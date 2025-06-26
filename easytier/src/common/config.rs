@@ -63,6 +63,9 @@ pub trait ConfigLoader: Send + Sync {
     fn get_ipv4(&self) -> Option<cidr::Ipv4Inet>;
     fn set_ipv4(&self, addr: Option<cidr::Ipv4Inet>);
 
+    fn get_ipv6(&self) -> Option<cidr::Ipv6Inet>;
+    fn set_ipv6(&self, addr: Option<cidr::Ipv6Inet>);
+
     fn get_dhcp(&self) -> bool;
     fn set_dhcp(&self, dhcp: bool);
 
@@ -258,6 +261,7 @@ struct Config {
     instance_name: Option<String>,
     instance_id: Option<uuid::Uuid>,
     ipv4: Option<String>,
+    ipv6: Option<String>,
     dhcp: Option<bool>,
     network_identity: Option<NetworkIdentity>,
     listeners: Option<Vec<url::Url>>,
@@ -409,6 +413,30 @@ impl ConfigLoader for TomlConfigLoader {
 
     fn set_ipv4(&self, addr: Option<cidr::Ipv4Inet>) {
         self.config.lock().unwrap().ipv4 = if let Some(addr) = addr {
+            Some(addr.to_string())
+        } else {
+            None
+        };
+    }
+
+    fn get_ipv6(&self) -> Option<cidr::Ipv6Inet> {
+        let locked_config = self.config.lock().unwrap();
+        locked_config
+            .ipv6
+            .as_ref()
+            .map(|s| s.parse().ok())
+            .flatten()
+            .map(|c: cidr::Ipv6Inet| {
+                if c.network_length() == 128 {
+                    cidr::Ipv6Inet::new(c.address(), 64).unwrap()
+                } else {
+                    c
+                }
+            })
+    }
+
+    fn set_ipv6(&self, addr: Option<cidr::Ipv6Inet>) {
+        self.config.lock().unwrap().ipv6 = if let Some(addr) = addr {
             Some(addr.to_string())
         } else {
             None

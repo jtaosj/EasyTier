@@ -547,16 +547,20 @@ impl Instance {
                     new_nic_ctx.run(ipv4_addr, ipv6_addr).await?;
                     let ifname = new_nic_ctx.ifname().await;
                     
-                    // For Magic DNS, use IPv4 if available, otherwise use a default
-                    let dns_ipv4 = ipv4_addr.unwrap_or_else(|| "169.254.1.1/32".parse().unwrap());
-                    Self::use_new_nic_ctx(
-                        self.nic_ctx.clone(),
-                        new_nic_ctx,
+                    // Create Magic DNS runner only if we have IPv4
+                    let dns_runner = if let Some(ipv4) = ipv4_addr {
                         Self::create_magic_dns_runner(
                             self.peer_manager.clone(),
                             ifname,
-                            dns_ipv4,
-                        ),
+                            ipv4,
+                        )
+                    } else {
+                        None
+                    };
+                    Self::use_new_nic_ctx(
+                        self.nic_ctx.clone(),
+                        new_nic_ctx,
+                        dns_runner,
                     )
                     .await;
                 }

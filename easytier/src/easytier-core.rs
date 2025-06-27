@@ -285,6 +285,13 @@ struct NetworkOptions {
 
     #[arg(
         long,
+        env = "ET_MULTI_THREAD_COUNT",
+        help = t!("core_clap.multi_thread_count").to_string(),
+    )]
+    multi_thread_count: Option<u32>,
+
+    #[arg(
+        long,
         env = "ET_DISABLE_IPV6",
         help = t!("core_clap.disable_ipv6").to_string(),
         num_args = 0..=1,
@@ -832,6 +839,7 @@ impl NetworkOptions {
         f.foreign_relay_bps_limit = self
             .foreign_relay_bps_limit
             .unwrap_or(f.foreign_relay_bps_limit);
+        f.multi_thread_count = self.multi_thread_count.unwrap_or(f.multi_thread_count);
         cfg.set_flags(f);
 
         if !self.exit_nodes.is_empty() {

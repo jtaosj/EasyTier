@@ -123,6 +123,7 @@ fn is_foreign_network_info_newer(
 }
 
 impl RoutePeerInfo {
+    #[allow(deprecated)]
     pub fn new() -> Self {
         Self {
             peer_id: 0,
@@ -141,9 +142,10 @@ impl RoutePeerInfo {
             feature_flag: None,
             peer_route_id: 0,
             network_length: 24,
-            quic_port: None,
             ipv6_addr: None,
             groups: Vec::new(),
+
+            quic_port: None,
         }
     }
 
@@ -191,10 +193,11 @@ impl RoutePeerInfo {
                 .map(|x| x.network_length() as u32)
                 .unwrap_or(24),
 
-            quic_port: global_ctx.get_quic_proxy_port().map(|x| x as u32),
             ipv6_addr: global_ctx.get_ipv6().map(|x| x.into()),
 
             groups: global_ctx.get_acl_groups(my_peer_id),
+
+            ..Default::default()
         }
     }
 
@@ -530,7 +533,7 @@ impl SyncedRouteInfo {
         for (peer_idx, peer_id_version) in conn_bitmap.peer_ids.iter().enumerate() {
             let connceted_peers = conn_bitmap.get_connected_peers(peer_idx);
             self.fill_empty_peer_info(&connceted_peers);
-            need_inc_version = self.update_conn_info_one_peer(peer_id_version, connceted_peers);
+            need_inc_version |= self.update_conn_info_one_peer(peer_id_version, connceted_peers);
         }
         if need_inc_version {
             self.version.inc();
@@ -548,7 +551,7 @@ impl SyncedRouteInfo {
                 peer_conn_info.connected_peer_ids.iter().copied().collect();
 
             self.fill_empty_peer_info(&connected_peers);
-            need_inc_version = self.update_conn_info_one_peer(&peer_id_version, connected_peers);
+            need_inc_version |= self.update_conn_info_one_peer(&peer_id_version, connected_peers);
         }
         if need_inc_version {
             self.version.inc();
@@ -3289,7 +3292,6 @@ mod tests {
                 routable_peer
                     .get_peer_map()
                     .list_peers()
-                    .await
                     .into_iter()
                     .collect::<BTreeSet<PeerId>>()
             );

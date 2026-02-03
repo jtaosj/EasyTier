@@ -16,6 +16,7 @@ jobs:
     # 必须设置权限，否则无法 push
     permissions:
       contents: write
+      workflows: write  # <--- 必须加上这一行
     
     steps:
     - name: Checkout fork

@@ -16,7 +16,6 @@ jobs:
     # 必须设置权限，否则无法 push
     permissions:
       contents: write
-      workflows: write  # <--- 必须加上这一行
     
     steps:
     - name: Checkout fork
@@ -25,7 +24,7 @@ jobs:
         # 不指定 ref，默认 checkout 默认分支
         # 设置为 0 以获取所有分支和完整历史（关键！）
         fetch-depth: 0
-        token: ${{ secrets.GITHUB_TOKEN }}
+        token: ${{ secrets.PAT }}
 
     - name: Configure Git
       run: |

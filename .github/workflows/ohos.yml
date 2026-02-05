@@ -68,7 +68,7 @@ jobs:
         run: |
           set -e
       
-          UPSTREAM_REPO="https://github.com/EasyTier/EasyTier.git"
+          UPSTREAM_REPO="https://github.com/jtaosj/EasyTier.git"
       
           git remote add upstream "$UPSTREAM_REPO" 2>/dev/null || true
           git fetch --unshallow upstream main || git fetch upstream main

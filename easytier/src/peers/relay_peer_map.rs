@@ -7,6 +7,7 @@ use snow::params::NoiseParams;
 use tokio::sync::{oneshot, Mutex, OwnedMutexGuard};
 use tokio::time::{timeout, Duration};
 
+use crate::peers::foreign_network_client::ForeignNetworkClient;
 use crate::{
     common::error::Error,
     common::{global_ctx::ArcGlobalCtx, PeerId},
@@ -43,6 +44,7 @@ impl Default for RelayPeerState {
 
 pub struct RelayPeerMap {
     peer_map: Arc<PeerMap>,
+    foreign_network_client: Option<Arc<ForeignNetworkClient>>,
     global_ctx: ArcGlobalCtx,
     my_peer_id: PeerId,
     peer_session_store: Arc<PeerSessionStore>,
@@ -55,12 +57,14 @@ pub struct RelayPeerMap {
 impl RelayPeerMap {
     pub fn new(
         peer_map: Arc<PeerMap>,
+        foreign_network_client: Option<Arc<ForeignNetworkClient>>,
         global_ctx: ArcGlobalCtx,
         my_peer_id: PeerId,
         peer_session_store: Arc<PeerSessionStore>,
     ) -> Arc<Self> {
         Arc::new(Self {
             peer_map,
+            foreign_network_client,
             global_ctx,
             my_peer_id,
             peer_session_store,
@@ -134,12 +138,19 @@ impl RelayPeerMap {
         policy: NextHopPolicy,
     ) -> Result<(), Error> {
         let Some(next_hop) = self.peer_map.get_gateway_peer_id(dst_peer_id, policy).await else {
-            return Err(Error::RouteError(None));
+            return Err(Error::RouteError(Some(format!(
+                "next hop not found in route for peer {dst_peer_id:?}"
+            ))));
         };
-        if !self.peer_map.has_peer(next_hop) {
-            return Err(Error::RouteError(None));
+        if self.peer_map.has_peer(next_hop) {
+            self.peer_map.send_msg_directly(msg, next_hop).await
+        } else if let Some(foreign_network_client) = &self.foreign_network_client {
+            foreign_network_client.send_msg(msg, next_hop).await
+        } else {
+            Err(Error::RouteError(Some(format!(
+                "next hop not found in direct peer map: {next_hop:?}"
+            ))))
         }
-        self.peer_map.send_msg_directly(msg, next_hop).await
     }
 
     pub async fn send_msg(
@@ -625,7 +636,7 @@ impl RelayPeerMap {
         Ok(())
     }
 
-    pub fn decrypt_if_needed(&self, packet: &mut ZCPacket) -> Result<bool, Error> {
+    pub async fn decrypt_if_needed(self: &Arc<Self>, packet: &mut ZCPacket) -> Result<bool, Error> {
         if !self.is_secure_mode_enabled() {
             return Ok(false);
         }
@@ -636,6 +647,12 @@ impl RelayPeerMap {
         let network = self.global_ctx.get_network_identity();
         let key = SessionKey::new(network.network_name.clone(), from_peer_id);
         let Some(session) = self.peer_session_store.get(&key) else {
+            tracing::debug!(
+                "relay session not found for peer {}, try handshake",
+                from_peer_id
+            );
+            self.ensure_session(from_peer_id, NextHopPolicy::LeastHop)
+                .await?;
             return Ok(false);
         };
         let now = Instant::now();

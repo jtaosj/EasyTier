@@ -54,8 +54,7 @@ jobs:
           rustup component add rustfmt
           rustup component add clippy
 
-      - name: Install cargo-hack
-        run: cargo install cargo-hack --locked
+      - uses: taiki-e/install-action@cargo-hack
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -65,7 +64,7 @@ jobs:
 
       - name: Check features
         if: ${{ !cancelled() }}
-        run: cargo hack check --package easytier --each-feature --features aes-gcm --exclude-features macos-ne --verbose
+        run: cargo hack check --package easytier --each-feature --exclude-features macos-ne --verbose
 
   pre-test:
     name: Build test

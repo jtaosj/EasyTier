@@ -209,7 +209,8 @@ watch(() => curNetwork.value, syncNormalizedNetwork, { immediate: true, deep: fa
                   </div>
                   <div class="items-center flex flex-col p-fluid gap-y-2">
                     <UrlListInput id="initial_nodes" v-model="curNetwork.peer_urls" :protos="protos"
-                      :add-label="t('add_initial_node')" :placeholder="t('initial_node_placeholder')" />
+                      defaultUrl="tcp://:11010" :add-label="t('add_initial_node')"
+                      :placeholder="t('initial_node_placeholder')" />
                   </div>
                 </div>
               </div>
@@ -302,6 +303,19 @@ watch(() => curNetwork.value, syncNormalizedNetwork, { immediate: true, deep: fa
                   </div>
                   <InputNumber id="mtu" v-model="curNetwork.mtu" aria-describedby="mtu-help" :format="false"
                     :placeholder="t('mtu_placeholder')" :min="400" :max="1380" fluid />
+                </div>
+              </div>
+
+              <div class="flex flex-row gap-x-9 flex-wrap">
+                <div class="flex flex-col gap-2 basis-5/12 grow">
+                  <div class="flex">
+                    <label for="instance_recv_bps_limit">{{ t('instance_recv_bps_limit') }}</label>
+                    <span class="pi pi-question-circle ml-2 self-center"
+                      v-tooltip="t('instance_recv_bps_limit_help')"></span>
+                  </div>
+                  <InputNumber id="instance_recv_bps_limit" v-model="curNetwork.instance_recv_bps_limit"
+                    aria-describedby="instance_recv_bps_limit-help" :format="false"
+                    :placeholder="t('instance_recv_bps_limit_placeholder')" :min="1" fluid />
                 </div>
               </div>
 

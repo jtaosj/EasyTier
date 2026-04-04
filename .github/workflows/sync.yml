@@ -1,14 +1,16 @@
-name: Sync All Branches
+name: Sync All Branches and Tags
 
 on:
   schedule:
-    # 每天 UTC 时间 0 点 6 分同步
-    - cron: '0 6 * * *'
+    # 每天 UTC 时间 6 点 0 分同步
+    - cron: '0 6 */3 * *'
   # 支持手动触发
   workflow_dispatch:
   # 当上游仓库有新 release 时触发
   repository_dispatch:
     types: [upstream-sync]
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   sync:
@@ -35,8 +37,8 @@ jobs:
       run: |
         # 添加上游仓库地址
         git remote add upstream https://github.com/EasyTier/EasyTier.git
-        #以此拉取上游所有分支信息
-        git fetch upstream
+        # 拉取上游所有分支信息，并带上 --tags 参数获取所有标签
+        git fetch upstream --tags
 
     - name: Sync all branches
       run: |
@@ -76,3 +78,10 @@ jobs:
             git push origin "$branch"
           fi
         done
+
+    - name: Sync all tags
+      run: |
+        echo "----------------------------------------------"
+        echo "Pushing tags to origin..."
+        # 将刚才拉取到的所有 tags 一次性推送到你自己的远程仓库
+        git push origin --tags

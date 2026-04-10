@@ -1,5 +1,6 @@
 use crate::common::log;
 use indoc::formatdoc;
+use std::sync::Arc;
 use std::{fs::OpenOptions, str::FromStr};
 
 pub type PeerRoutePair = crate::proto::api::instance::PeerRoutePair;
@@ -18,7 +19,7 @@ pub fn float_to_str(f: f64, precision: usize) -> String {
 
 #[cfg(target_os = "windows")]
 pub fn utf8_or_gbk_to_string(s: &[u8]) -> String {
-    use encoding::{all::GBK, DecoderTrap, Encoding};
+    use encoding::{DecoderTrap, Encoding, all::GBK};
     if let Ok(utf8_str) = String::from_utf8(s.to_vec()) {
         utf8_str
     } else {
@@ -136,7 +137,7 @@ pub fn find_free_tcp_port(mut range: std::ops::Range<u16>) -> Option<u16> {
     range.find(|&port| check_tcp_available(port))
 }
 
-pub fn weak_upgrade<T>(weak: &std::sync::Weak<T>) -> anyhow::Result<std::sync::Arc<T>> {
+pub fn weak_upgrade<T>(weak: &std::sync::Weak<T>) -> anyhow::Result<Arc<T>> {
     weak.upgrade()
         .ok_or_else(|| anyhow::anyhow!("{} not available", std::any::type_name::<T>()))
 }

@@ -3,7 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use super::{create_connector_by_url, http_connector::TunnelWithInfo};
 use crate::{
     common::{
-        dns::{resolve_txt_record, RESOLVER},
+        dns::{RESOLVER, resolve_txt_record},
         error::Error,
         global_ctx::ArcGlobalCtx,
         log,
@@ -14,8 +14,7 @@ use crate::{
 use anyhow::Context;
 use dashmap::DashSet;
 use hickory_resolver::proto::rr::rdata::SRV;
-use itertools::Itertools;
-use rand::{seq::SliceRandom, Rng as _};
+use rand::{Rng as _, seq::SliceRandom};
 use strum::VariantArray;
 
 fn weighted_choice<T>(options: &[(T, u64)]) -> Option<&T> {
@@ -117,7 +116,7 @@ impl DnsTunnelConnector {
         let srv_domains = IpScheme::VARIANTS
             .iter()
             .map(|s| (s, format!("_easytier._{}.{}", s, domain_name)))
-            .collect_vec();
+            .collect::<Vec<_>>();
         tracing::info!("build srv_domains: {:?}", srv_domains);
         let responses = Arc::new(DashSet::new());
         let srv_lookup_tasks = srv_domains

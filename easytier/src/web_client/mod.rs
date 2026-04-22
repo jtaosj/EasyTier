@@ -1,14 +1,14 @@
-use std::sync::Arc;
+use std::{net::Ipv4Addr, str::FromStr, sync::Arc};
 
 use crate::{
     common::{
-        config::TomlConfigLoader, global_ctx::GlobalCtx, log, os_info::collect_device_os_info,
+        config::TomlConfigLoader, global_ctx::GlobalCtx, idn, log, os_info::collect_device_os_info,
         scoped_task::ScopedTask, set_default_machine_id, stun::MockStunInfoCollector,
     },
     connector::create_connector_by_url,
     instance_manager::{DaemonGuard, NetworkInstanceManager},
     proto::common::NatType,
-    tunnel::{IpVersion, TunnelConnector},
+    tunnel::{IpVersion, TunnelConnector, TunnelScheme},
 };
 use anyhow::{Context as _, Result};
 use async_trait::async_trait;
@@ -46,6 +46,64 @@ pub struct WebClient {
     tasks: ScopedTask<()>,
     manager_guard: DaemonGuard,
     connected: Arc<AtomicBool>,
+}
+
+fn validate_config_server_url(config_server_url: &Url) -> Result<Url> {
+    let config_server_url = idn::convert_idn_to_ascii(config_server_url.clone())?;
+    let scheme = TunnelScheme::try_from(&config_server_url).map_err(|_| {
+        anyhow::anyhow!(
+            "unsupported config server scheme: {}",
+            config_server_url.scheme()
+        )
+    })?;
+
+    match scheme {
+        #[cfg(unix)]
+        TunnelScheme::Unix => {}
+        TunnelScheme::Ip(_) => {
+            if config_server_url.host_str().is_none() {
+                anyhow::bail!(
+                    "config server URL host should not be empty: {}",
+                    config_server_url
+                );
+            }
+
+            validate_config_server_ip_literal(&config_server_url)?;
+        }
+        TunnelScheme::Http
+        | TunnelScheme::Https
+        | TunnelScheme::Ring
+        | TunnelScheme::Txt
+        | TunnelScheme::Srv => {
+            if config_server_url.host_str().is_none() {
+                anyhow::bail!(
+                    "config server URL host should not be empty: {}",
+                    config_server_url
+                );
+            }
+        }
+    }
+
+    Ok(config_server_url)
+}
+
+fn validate_config_server_ip_literal(config_server_url: &Url) -> Result<()> {
+    let Some(host) = config_server_url.host_str() else {
+        return Ok(());
+    };
+
+    let looks_like_ipv4_literal = host.split('.').count() == 4
+        && host
+            .split('.')
+            .all(|segment| !segment.is_empty() && segment.chars().all(|ch| ch.is_ascii_digit()));
+
+    if looks_like_ipv4_literal {
+        Ipv4Addr::from_str(host).map_err(|_| {
+            anyhow::anyhow!("invalid config server IP address: {}", config_server_url)
+        })?;
+    }
+
+    Ok(())
 }
 
 impl WebClient {
@@ -217,7 +275,7 @@ pub async fn run_web_client(
         .with_context(|| "failed to parse config server URL")?,
     };
 
-    let mut c_url = config_server_url.clone();
+    let mut c_url = validate_config_server_url(&config_server_url)?;
     if !matches!(c_url.scheme(), "ws" | "wss") {
         c_url.set_path("");
     }
@@ -242,16 +300,20 @@ pub async fn run_web_client(
     let mut flags = global_ctx.get_flags();
     flags.bind_device = false;
     global_ctx.set_flags(flags);
+
+    // Build the connector up front so invalid URLs fail fast without connecting.
+    let connector = create_connector_by_url(c_url.as_str(), &global_ctx, IpVersion::Both).await?;
+
     let hostname = match hostname {
         None => gethostname::gethostname().to_string_lossy().to_string(),
         Some(hostname) => hostname,
     };
     Ok(WebClient::new(
-        create_connector_by_url(c_url.as_str(), &global_ctx, IpVersion::Both).await?,
+        connector,
         token.to_string(),
         hostname,
         secure_mode,
-        manager.clone(),
+        manager,
         hooks,
     ))
 }
@@ -261,6 +323,7 @@ mod tests {
     use std::sync::{Arc, atomic::AtomicBool};
 
     use crate::instance_manager::NetworkInstanceManager;
+    use url::Url;
 
     #[tokio::test]
     async fn test_manager_wait() {
@@ -290,5 +353,65 @@ mod tests {
         manager.wait().await;
         assert!(sleep_finish.load(std::sync::atomic::Ordering::Relaxed));
         println!("Manager stopped.");
+    }
+
+    #[tokio::test]
+    async fn test_run_web_client_with_unreachable_config_server() {
+        let manager = Arc::new(NetworkInstanceManager::new());
+        let client = super::run_web_client(
+            "udp://config-server.invalid:22020/test",
+            None,
+            None,
+            false,
+            manager,
+            None,
+        )
+        .await
+        .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!client.is_connected());
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn test_run_web_client_rejects_invalid_config_server_scheme() {
+        let manager = Arc::new(NetworkInstanceManager::new());
+        let err =
+            match super::run_web_client("ftp://example.com/test", None, None, false, manager, None)
+                .await
+            {
+                Ok(_) => panic!("invalid config server scheme should fail fast"),
+                Err(err) => err,
+            };
+
+        assert!(err.to_string().contains("unsupported config server scheme"));
+    }
+
+    #[tokio::test]
+    async fn test_run_web_client_rejects_invalid_config_server_ip_literal() {
+        let manager = Arc::new(NetworkInstanceManager::new());
+        let err = match super::run_web_client(
+            "udp://256.256.256.256:22020/test",
+            None,
+            None,
+            false,
+            manager,
+            None,
+        )
+        .await
+        {
+            Ok(_) => panic!("invalid config server ip literal should fail fast"),
+            Err(err) => err,
+        };
+
+        assert!(err.to_string().contains("invalid config server IP address"));
+    }
+
+    #[test]
+    fn test_validate_config_server_url_allows_numeric_hostname() {
+        let url = Url::parse("udp://1234:22020/test").unwrap();
+
+        assert!(super::validate_config_server_url(&url).is_ok());
     }
 }

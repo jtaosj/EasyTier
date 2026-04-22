@@ -1,5 +1,7 @@
 use std::{
+    net::Ipv4Addr,
     net::{SocketAddr, SocketAddrV4, SocketAddrV6},
+    str::FromStr,
     sync::Arc,
 };
 
@@ -88,6 +90,23 @@ async fn set_bind_addr_for_peer_connector(
     let _ = connector;
 }
 
+fn validate_ip_literal_host(url: &url::Url) -> Result<(), Error> {
+    let Some(host) = url.host_str() else {
+        return Ok(());
+    };
+
+    let looks_like_ipv4_literal = host.split('.').count() == 4
+        && host
+            .split('.')
+            .all(|segment| !segment.is_empty() && segment.chars().all(|ch| ch.is_ascii_digit()));
+
+    if looks_like_ipv4_literal {
+        Ipv4Addr::from_str(host).map_err(|_| Error::InvalidUrl(url.to_string()))?;
+    }
+
+    Ok(())
+}
+
 pub async fn create_connector_by_url(
     url: &str,
     global_ctx: &ArcGlobalCtx,
@@ -98,9 +117,17 @@ pub async fn create_connector_by_url(
     let scheme = (&url)
         .try_into()
         .map_err(|_| TunnelError::InvalidProtocol(url.scheme().to_owned()))?;
+    if matches!(scheme, TunnelScheme::Ip(_)) {
+        validate_ip_literal_host(&url)?;
+    }
+    let bind_device_dst_addr =
+        if matches!(scheme, TunnelScheme::Ip(_)) && global_ctx.config.get_flags().bind_device {
+            Some(SocketAddr::from_url(url.clone(), ip_version).await?)
+        } else {
+            None
+        };
     let mut connector: Box<dyn TunnelConnector + 'static> = match scheme {
         TunnelScheme::Ip(scheme) => {
-            let dst_addr = SocketAddr::from_url(url.clone(), ip_version).await?;
             let mut connector: Box<dyn TunnelConnector> = match scheme {
                 IpScheme::Tcp => TcpTunnelConnector::new(url).boxed(),
                 IpScheme::Udp => UdpTunnelConnector::new(url).boxed(),
@@ -125,7 +152,7 @@ pub async fn create_connector_by_url(
                 #[cfg(feature = "faketcp")]
                 IpScheme::FakeTcp => tunnel::fake_tcp::FakeTcpTunnelConnector::new(url).boxed(),
             };
-            if global_ctx.config.get_flags().bind_device {
+            if let Some(dst_addr) = bind_device_dst_addr {
                 set_bind_addr_for_peer_connector(
                     &mut connector,
                     dst_addr.is_ipv4(),
@@ -158,9 +185,15 @@ pub async fn create_connector_by_url(
 
 #[cfg(test)]
 mod tests {
-    use crate::proto::common::PeerFeatureFlag;
+    use std::sync::Arc;
 
-    use super::{should_background_p2p_with_peer, should_try_p2p_with_peer};
+    use crate::common::{config::TomlConfigLoader, global_ctx::GlobalCtx};
+    use crate::proto::common::PeerFeatureFlag;
+    use crate::tunnel::IpVersion;
+
+    use super::{
+        create_connector_by_url, should_background_p2p_with_peer, should_try_p2p_with_peer,
+    };
 
     #[test]
     fn lazy_background_p2p_requires_need_p2p() {
@@ -292,5 +325,27 @@ mod tests {
             true,
             false
         ));
+    }
+
+    #[tokio::test]
+    async fn create_connector_rejects_invalid_ipv4_literal() {
+        let global_ctx = Arc::new(GlobalCtx::new(TomlConfigLoader::default()));
+
+        let err =
+            create_connector_by_url("udp://256.256.256.256:22020", &global_ctx, IpVersion::Both)
+                .await
+                .unwrap_err();
+
+        assert!(err.to_string().contains("256.256.256.256"));
+    }
+
+    #[tokio::test]
+    async fn create_connector_allows_numeric_hostname() {
+        let global_ctx = Arc::new(GlobalCtx::new(TomlConfigLoader::default()));
+
+        let result =
+            create_connector_by_url("udp://1234:22020", &global_ctx, IpVersion::Both).await;
+
+        assert!(result.is_ok());
     }
 }

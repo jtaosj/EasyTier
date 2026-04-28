@@ -1,5 +1,6 @@
 use crate::common::config::{
-    ConfigFileControl, ConfigSource, PortForwardConfig, process_secure_mode_cfg,
+    ConfigFileControl, ConfigSource, PortForwardConfig, parse_mapped_listener_urls,
+    process_secure_mode_cfg,
 };
 use crate::proto::api::{self, manage};
 use crate::proto::rpc_types::controller::BaseController;
@@ -671,22 +672,8 @@ impl NetworkConfig {
         }
 
         if !self.mapped_listeners.is_empty() {
-            cfg.set_mapped_listeners(Some(
-                self.mapped_listeners
-                    .iter()
-                    .map(|s| {
-                        s.parse()
-                            .with_context(|| format!("mapped listener is not a valid url: {}", s))
-                            .unwrap()
-                    })
-                    .map(|s: url::Url| {
-                        if s.port().is_none() {
-                            panic!("mapped listener port is missing: {}", s);
-                        }
-                        s
-                    })
-                    .collect(),
-            ));
+            let mapped_listeners = parse_mapped_listener_urls(&self.mapped_listeners)?;
+            cfg.set_mapped_listeners(Some(mapped_listeners));
         }
 
         if let Some(credential_file) = self
@@ -725,6 +712,24 @@ impl NetworkConfig {
 
         if let Some(use_smoltcp) = self.use_smoltcp {
             flags.use_smoltcp = use_smoltcp;
+        }
+
+        if let Some(ipv6_public_addr_provider) = self.ipv6_public_addr_provider {
+            cfg.set_ipv6_public_addr_provider(ipv6_public_addr_provider);
+        }
+
+        if let Some(ipv6_public_addr_auto) = self.ipv6_public_addr_auto {
+            cfg.set_ipv6_public_addr_auto(ipv6_public_addr_auto);
+        }
+
+        if let Some(ipv6_public_addr_prefix) = self
+            .ipv6_public_addr_prefix
+            .as_ref()
+            .filter(|prefix| !prefix.is_empty())
+        {
+            cfg.set_ipv6_public_addr_prefix(Some(ipv6_public_addr_prefix.parse().with_context(
+                || format!("failed to parse ipv6 public address prefix: {ipv6_public_addr_prefix}"),
+            )?));
         }
 
         if let Some(disable_ipv6) = self.disable_ipv6 {
@@ -875,6 +880,17 @@ impl NetworkConfig {
             result.virtual_ipv4 = Some(ipv4.address().to_string());
             result.network_length = Some(ipv4.network_length() as i32);
         }
+
+        if config.get_ipv6_public_addr_provider() != default_config.get_ipv6_public_addr_provider()
+        {
+            result.ipv6_public_addr_provider = Some(config.get_ipv6_public_addr_provider());
+        }
+        if config.get_ipv6_public_addr_auto() != default_config.get_ipv6_public_addr_auto() {
+            result.ipv6_public_addr_auto = Some(config.get_ipv6_public_addr_auto());
+        }
+        result.ipv6_public_addr_prefix = config
+            .get_ipv6_public_addr_prefix()
+            .map(|prefix| prefix.to_string());
 
         let peers = config.get_peers();
         result.networking_method = Some(NetworkingMethod::Manual as i32);

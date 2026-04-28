@@ -7,6 +7,8 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
+// region CancellableTask
+
 #[derive(Debug)]
 pub struct CancellableTask<Output> {
     handle: AbortOnDropHandle<Output>,
@@ -74,3 +76,5 @@ impl<Output> Future for CancellableTask<Output> {
             .map(|result| result.map_err(Into::into))
     }
 }
+
+// endregion

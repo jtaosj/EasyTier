@@ -1,3 +1,5 @@
+use crossbeam::atomic::AtomicCell;
+use futures::{StreamExt, TryFutureExt};
 use std::{
     any::Any,
     fmt::Debug,
@@ -8,11 +10,9 @@ use std::{
     },
 };
 
-use crossbeam::atomic::AtomicCell;
-use futures::{StreamExt, TryFutureExt};
-
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use guarden::guard;
 use hmac::Mac;
 use prost::Message;
 
@@ -27,11 +27,17 @@ use zerocopy::AsBytes;
 
 use snow::{HandshakeState, params::NoiseParams};
 
+use super::{
+    PacketRecvChan,
+    peer_conn_ping::PeerConnPinger,
+    peer_session::{PeerSession, PeerSessionAction},
+    traffic_metrics::AggregateTrafficMetrics,
+};
+use crate::utils::BoxExt;
 use crate::{
     common::{
         PeerId,
         config::{NetworkIdentity, NetworkSecretDigest},
-        defer,
         error::Error,
         global_ctx::ArcGlobalCtx,
     },
@@ -52,13 +58,6 @@ use crate::{
         stats::{Throughput, WindowLatency},
     },
     use_global_var,
-};
-
-use super::{
-    PacketRecvChan,
-    peer_conn_ping::PeerConnPinger,
-    peer_session::{PeerSession, PeerSessionAction},
-    traffic_metrics::AggregateTrafficMetrics,
 };
 
 pub type PeerConnId = uuid::Uuid;
@@ -381,9 +380,9 @@ impl PeerConn {
             session_filter,
             noise_handshake_result: None,
 
-            tunnel: Arc::new(Mutex::new(Box::new(defer::Defer::new(move || {
-                mpsc_tunnel.close()
-            })))),
+            tunnel: Arc::new(Mutex::new(
+                guard!([mut mpsc_tunnel] mpsc_tunnel.close()).boxed(),
+            )),
             sink,
             recv: Mutex::new(Some(recv)),
             tunnel_info,

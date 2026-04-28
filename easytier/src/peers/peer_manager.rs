@@ -1062,7 +1062,7 @@ impl PeerManager {
                         &ret,
                         true,
                         global_ctx.get_ipv4().map(|x| x.address()),
-                        global_ctx.get_ipv6().map(|x| x.address()),
+                        |dst| global_ctx.is_ip_local_ipv6(&dst),
                         &route,
                     ) {
                         continue;
@@ -1291,6 +1291,18 @@ impl PeerManager {
         self.get_route().list_proxy_cidrs_v6().await
     }
 
+    pub async fn list_public_ipv6_routes(&self) -> BTreeSet<cidr::Ipv6Inet> {
+        self.get_route().list_public_ipv6_routes().await
+    }
+
+    pub async fn get_my_public_ipv6_addr(&self) -> Option<cidr::Ipv6Inet> {
+        self.get_route().get_my_public_ipv6_addr().await
+    }
+
+    pub async fn get_local_public_ipv6_info(&self) -> instance::ListPublicIpv6InfoResponse {
+        self.get_route().get_local_public_ipv6_info().await
+    }
+
     pub async fn dump_route(&self) -> String {
         self.get_route().dump().await
     }
@@ -1330,7 +1342,7 @@ impl PeerManager {
             data,
             false,
             None,
-            None,
+            |_| false,
             &self.get_route(),
         ) {
             return false;
@@ -1532,6 +1544,10 @@ impl PeerManager {
             dst_peers.extend(self.peers.list_routes().await.iter().map(|x| *x.key()));
         } else if let Some(peer_id) = self.peers.get_peer_id_by_ipv6(ipv6_addr).await {
             dst_peers.push(peer_id);
+        } else if !ipv6_addr.is_unicast_link_local()
+            && let Some(peer_id) = self.get_route().get_public_ipv6_gateway_peer_id().await
+        {
+            dst_peers.push(peer_id);
         } else if !ipv6_addr.is_unicast_link_local() {
             // NOTE: never route link local address to exit node.
             for exit_node in self.exit_nodes.read().await.iter() {
@@ -1657,8 +1673,12 @@ impl PeerManager {
 
             #[cfg(not(target_env = "ohos"))]
             {
-                if not_send_to_self && *peer_id == self.my_peer_id {
-                    // the packet may be sent to vpn portal, so we just set flags instead of drop it
+                if not_send_to_self
+                    && *peer_id == self.my_peer_id
+                    && !self.global_ctx.is_ip_local_virtual_ip(&ip_addr)
+                {
+                    // Keep the loop-prevention flags for proxy-induced self-delivery where
+                    // the destination is not this node's own EasyTier-managed IP.
                     hdr.set_not_send_to_tun(true);
                     hdr.set_no_proxy(true);
                 }
@@ -1875,6 +1895,15 @@ impl PeerManager {
             version: EASYTIER_VERSION.to_string(),
             feature_flag: Some(self.global_ctx.get_feature_flags()),
             ip_list: Some(self.global_ctx.get_ip_collector().collect_ip_addrs().await),
+            public_ipv6_addr: self.get_my_public_ipv6_addr().await.map(Into::into),
+            ipv6_public_addr_prefix: self
+                .global_ctx
+                .get_advertised_ipv6_public_addr_prefix()
+                .map(|prefix| {
+                    cidr::Ipv6Inet::new(prefix.first_address(), prefix.network_length())
+                        .unwrap()
+                        .into()
+                }),
         }
     }
 

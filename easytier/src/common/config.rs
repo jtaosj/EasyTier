@@ -21,7 +21,7 @@ use crate::{
         api::manage::ConfigSource as RpcConfigSource,
         common::{CompressionAlgoPb, PortForwardConfigPb, SecureModeConfig, SocketType},
     },
-    tunnel::generate_digest_from_str,
+    tunnel::{IpScheme, TunnelScheme, generate_digest_from_str},
 };
 
 use super::env_parser;
@@ -72,6 +72,36 @@ pub fn gen_default_flags() -> Flags {
         instance_recv_bps_limit: u64::MAX,
         disable_upnp: false,
     }
+}
+
+fn mapped_listener_allows_implicit_port(url: &url::Url) -> bool {
+    TunnelScheme::try_from(url)
+        .ok()
+        .and_then(|scheme| IpScheme::try_from(scheme).ok())
+        .is_some()
+}
+
+pub fn validate_mapped_listener_url(url: &url::Url) -> Result<(), anyhow::Error> {
+    if url.port().is_none() && !mapped_listener_allows_implicit_port(url) {
+        anyhow::bail!("mapped listener port is missing: {}", url);
+    }
+
+    Ok(())
+}
+
+pub fn parse_mapped_listener_urls(
+    mapped_listeners: &[String],
+) -> Result<Vec<url::Url>, anyhow::Error> {
+    mapped_listeners
+        .iter()
+        .map(|s| {
+            let url: url::Url = s
+                .parse()
+                .with_context(|| format!("mapped listener is not a valid url: {}", s))?;
+            validate_mapped_listener_url(&url)?;
+            Ok(url)
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Display, EnumString, VariantArray)]
@@ -139,6 +169,15 @@ pub trait ConfigLoader: Send + Sync {
 
     fn get_ipv6(&self) -> Option<cidr::Ipv6Inet>;
     fn set_ipv6(&self, addr: Option<cidr::Ipv6Inet>);
+
+    fn get_ipv6_public_addr_provider(&self) -> bool;
+    fn set_ipv6_public_addr_provider(&self, enabled: bool);
+
+    fn get_ipv6_public_addr_auto(&self) -> bool;
+    fn set_ipv6_public_addr_auto(&self, enabled: bool);
+
+    fn get_ipv6_public_addr_prefix(&self) -> Option<cidr::Ipv6Cidr>;
+    fn set_ipv6_public_addr_prefix(&self, prefix: Option<cidr::Ipv6Cidr>);
 
     fn get_dhcp(&self) -> bool;
     fn set_dhcp(&self, dhcp: bool);
@@ -489,6 +528,9 @@ struct Config {
     instance_id: Option<uuid::Uuid>,
     ipv4: Option<String>,
     ipv6: Option<String>,
+    ipv6_public_addr_provider: Option<bool>,
+    ipv6_public_addr_auto: Option<bool>,
+    ipv6_public_addr_prefix: Option<String>,
     dhcp: Option<bool>,
     network_identity: Option<NetworkIdentity>,
     listeners: Option<Vec<url::Url>>,
@@ -668,6 +710,43 @@ impl ConfigLoader for TomlConfigLoader {
 
     fn set_ipv6(&self, addr: Option<cidr::Ipv6Inet>) {
         self.config.lock().unwrap().ipv6 = addr.map(|addr| addr.to_string());
+    }
+
+    fn get_ipv6_public_addr_provider(&self) -> bool {
+        self.config
+            .lock()
+            .unwrap()
+            .ipv6_public_addr_provider
+            .unwrap_or_default()
+    }
+
+    fn set_ipv6_public_addr_provider(&self, enabled: bool) {
+        self.config.lock().unwrap().ipv6_public_addr_provider = Some(enabled);
+    }
+
+    fn get_ipv6_public_addr_auto(&self) -> bool {
+        self.config
+            .lock()
+            .unwrap()
+            .ipv6_public_addr_auto
+            .unwrap_or_default()
+    }
+
+    fn set_ipv6_public_addr_auto(&self, enabled: bool) {
+        self.config.lock().unwrap().ipv6_public_addr_auto = Some(enabled);
+    }
+
+    fn get_ipv6_public_addr_prefix(&self) -> Option<cidr::Ipv6Cidr> {
+        let locked_config = self.config.lock().unwrap();
+        locked_config
+            .ipv6_public_addr_prefix
+            .as_ref()
+            .and_then(|s| s.parse().ok())
+    }
+
+    fn set_ipv6_public_addr_prefix(&self, prefix: Option<cidr::Ipv6Cidr>) {
+        self.config.lock().unwrap().ipv6_public_addr_prefix =
+            prefix.map(|prefix| prefix.to_string());
     }
 
     fn get_dhcp(&self) -> bool {
@@ -1227,6 +1306,37 @@ stun_servers = [
     }
 
     #[test]
+    fn test_parse_mapped_listener_urls_allows_ws_without_port() {
+        let parsed = parse_mapped_listener_urls(&[
+            "ws://example.com".to_string(),
+            "wss://example.com/path".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].scheme(), "ws");
+        assert_eq!(parsed[0].port(), None);
+        assert_eq!(parsed[1].scheme(), "wss");
+        assert_eq!(parsed[1].port(), None);
+    }
+
+    #[test]
+    fn test_parse_mapped_listener_urls_allows_tcp_without_port() {
+        let parsed = parse_mapped_listener_urls(&["tcp://127.0.0.1".to_string()]).unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].scheme(), "tcp");
+        assert_eq!(parsed[0].port(), None);
+    }
+
+    #[test]
+    fn test_parse_mapped_listener_urls_requires_port_for_non_ip_scheme() {
+        let err = parse_mapped_listener_urls(&["ring://peer-id".to_string()]).unwrap_err();
+
+        assert!(err.to_string().contains("mapped listener port is missing"));
+    }
+
+    #[test]
     fn test_network_config_source_user_is_implicit() {
         let config = TomlConfigLoader::default();
         config.set_network_config_source(Some(ConfigSource::User));
@@ -1249,6 +1359,26 @@ source = "user"
             ConfigSource::User
         );
         assert!(!explicit_user.dump().contains("[source]"));
+    }
+
+    #[test]
+    fn test_ipv6_public_addr_config_roundtrip() {
+        let config = TomlConfigLoader::default();
+        let prefix: cidr::Ipv6Cidr = "2001:db8:100::/64".parse().unwrap();
+
+        config.set_ipv6_public_addr_provider(true);
+        config.set_ipv6_public_addr_auto(true);
+        config.set_ipv6_public_addr_prefix(Some(prefix));
+
+        assert!(config.get_ipv6_public_addr_provider());
+        assert!(config.get_ipv6_public_addr_auto());
+        assert_eq!(config.get_ipv6_public_addr_prefix(), Some(prefix));
+
+        let dumped = config.dump();
+        let loaded = TomlConfigLoader::new_from_str(&dumped).unwrap();
+        assert!(loaded.get_ipv6_public_addr_provider());
+        assert!(loaded.get_ipv6_public_addr_auto());
+        assert_eq!(loaded.get_ipv6_public_addr_prefix(), Some(prefix));
     }
 
     #[tokio::test]

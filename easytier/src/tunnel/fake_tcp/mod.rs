@@ -158,29 +158,38 @@ impl FakeTcpTunnelListener {
             IpAddr::V6(ip) => (None, Some(ip)),
         };
 
-        let ret = match self.stack_map.entry(interface_name.to_string()) {
-            dashmap::Entry::Occupied(entry) => entry.get().clone(),
-            dashmap::Entry::Vacant(entry) => {
-                let tun =
-                    create_tun_off_runtime(interface_name.to_string(), None, local_socket_addr)
-                        .await?;
-                tracing::info!(
-                    ?local_socket_addr,
-                    "create new stack with interface_name: {:?}",
-                    interface_name
-                );
-                let stack = Arc::new(Mutex::new(stack::Stack::new(
-                    tun,
-                    local_ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
-                    local_ip6,
-                    accept_result.mac,
-                )));
-                entry.insert(stack.clone());
-                stack
-            }
-        };
+        if let Some(entry) = self.stack_map.get(interface_name) {
+            let stack = entry.clone();
+            drop(entry);
 
-        Ok(ret)
+            if !stack.lock().await.is_closed() {
+                return Ok(stack);
+            }
+
+            tracing::warn!(
+                interface_name,
+                "fake_tcp stack reader_task finished, recreating stack"
+            );
+            self.stack_map.remove(interface_name);
+        }
+
+        let tun =
+            create_tun_off_runtime(interface_name.to_string(), None, local_socket_addr).await?;
+        tracing::info!(
+            ?local_socket_addr,
+            "create new stack with interface_name: {:?}",
+            interface_name
+        );
+        let stack = Arc::new(Mutex::new(stack::Stack::new(
+            tun,
+            local_ip.unwrap_or(Ipv4Addr::UNSPECIFIED),
+            local_ip6,
+            accept_result.mac,
+        )));
+        self.stack_map
+            .insert(interface_name.to_string(), stack.clone());
+
+        Ok(stack)
     }
 }
 
@@ -221,13 +230,24 @@ impl TunnelListener for FakeTcpTunnelListener {
 
     async fn accept(&mut self) -> Result<Box<dyn Tunnel>, TunnelError> {
         tracing::debug!("FakeTcpTunnelListener waiting for accept");
-        let res = self.do_accept().await?;
-        let stack = self.get_stack(&res).await?;
-        let socket = stack
-            .lock()
-            .await
-            .alloc_established_socket(res.local_addr, res.remote_addr, stack::State::Established)
-            .await;
+        let (res, stack, socket) = loop {
+            let res = self.do_accept().await?;
+            let stack = self.get_stack(&res).await?;
+            let socket = stack.lock().await.alloc_established_socket(
+                res.local_addr,
+                res.remote_addr,
+                stack::State::Established,
+            );
+            let Some(socket) = socket else {
+                tracing::warn!(
+                    interface_name = res.interface_name,
+                    "fake_tcp stack closed while accepting connection, dropping accepted socket"
+                );
+                self.stack_map.remove(&res.interface_name);
+                continue;
+            };
+            break (res, stack, socket);
+        };
 
         tracing::info!(
             ?res,
@@ -359,7 +379,9 @@ impl TunnelConnector for FakeTcpTunnelConnector {
 
         let socket = stack
             .alloc_established_socket(local_addr, remote_addr, stack::State::SynSent)
-            .await;
+            .ok_or(TunnelError::InternalError(
+                "FakeTCP stack closed while allocating socket".into(),
+            ))?;
 
         let os_stream = os_socket.connect(remote_addr).await?;
 

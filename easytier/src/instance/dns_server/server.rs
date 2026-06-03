@@ -19,7 +19,7 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use tokio::task::JoinSet;
 
-use crate::common::dns::get_default_resolver_config;
+use crate::common::dns::{ForwardResolverConfig, get_forward_resolver_configs};
 
 use super::config::{GeneralConfig, Record, RunConfig};
 
@@ -38,14 +38,6 @@ struct CatalogRequestHandler {
 
 impl CatalogRequestHandler {
     fn new(catalog: Arc<RwLock<Catalog>>) -> CatalogRequestHandler {
-        // let system_conf = read_system_conf();
-        // let recursor = match system_conf {
-        //     Ok((conf, _)) => RecursorBuilder::default().build(conf),
-        //     Err(_) => RecursorBuilder::default().build(get_default_resolver_config()),
-        // }
-        // // policy is security unware, this will never return an error
-        // .unwrap();
-
         Self { catalog }
     }
 }
@@ -89,8 +81,13 @@ impl Server {
         }
 
         // use forwarder authority for the root zone
-        let system_conf =
-            read_system_conf().unwrap_or((get_default_resolver_config(), ResolverOpts::default()));
+        let system_conf = get_forward_resolver_configs()
+            .into_iter()
+            .find_map(|config| match config {
+                ForwardResolverConfig::System => read_system_conf().ok(),
+                ForwardResolverConfig::Hickory(config) => Some((config, ResolverOpts::default())),
+            })
+            .with_context(|| "failed to configure upstream DNS forwarder")?;
         let forward_config = ForwardConfig {
             name_servers: system_conf
                 .0

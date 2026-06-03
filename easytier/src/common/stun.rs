@@ -11,7 +11,7 @@ use crossbeam::atomic::AtomicCell;
 use rand::seq::IteratorRandom;
 use socket2::{SockAddr, SockRef};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UdpSocket, lookup_host};
+use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, broadcast};
 use tokio::task::JoinSet;
 use tracing::{Instrument, Level};
@@ -22,7 +22,7 @@ use stun_codec::{Message, MessageClass, MessageDecoder, MessageEncoder};
 
 use crate::common::error::Error;
 
-use super::dns::resolve_txt_record;
+use super::dns::{resolve_host, resolve_txt_record};
 use super::stun_codec_ext::*;
 
 const DEFAULT_UDP_STUN_SERVERS: &[&str] = &[
@@ -66,6 +66,14 @@ impl HostResolverIter {
         Ok(txt_data.split(" ").map(|x| x.to_string()).collect())
     }
 
+    fn parse_ipv6_socket_addr_without_brackets(host: &str) -> Option<SocketAddr> {
+        let (ip, port) = host.rsplit_once(':')?;
+        Some(SocketAddr::new(
+            IpAddr::V6(ip.parse().ok()?),
+            port.parse().ok()?,
+        ))
+    }
+
     #[async_recursion::async_recursion]
     async fn next(&mut self) -> Option<SocketAddr> {
         if self.ips.is_empty() {
@@ -74,11 +82,6 @@ impl HostResolverIter {
             }
 
             let host = self.hostnames.remove(0);
-            let host = if host.contains(':') {
-                host
-            } else {
-                format!("{}:3478", host)
-            };
 
             if host.starts_with("txt:") {
                 let domain_name = host.trim_start_matches("txt:");
@@ -104,22 +107,53 @@ impl HostResolverIter {
             }
 
             let use_ipv6 = self.use_ipv6;
-
-            match lookup_host(&host).await {
-                Ok(ips) => {
-                    self.ips = ips
-                        .filter(|x| if use_ipv6 { x.is_ipv6() } else { x.is_ipv4() })
-                        .choose_multiple(&mut rand::thread_rng(), self.max_ip_per_domain as usize);
-
-                    if self.ips.is_empty() {
-                        return self.next().await;
-                    }
+            if let Ok(addr) = host.parse::<SocketAddr>() {
+                if (use_ipv6 && addr.is_ipv6()) || (!use_ipv6 && addr.is_ipv4()) {
+                    self.ips = vec![addr];
                 }
-                Err(e) => {
-                    tracing::warn!(?host, ?e, "lookup host for stun failed");
+                if self.ips.is_empty() {
                     return self.next().await;
                 }
-            };
+            } else if let Some(addr) = Self::parse_ipv6_socket_addr_without_brackets(&host) {
+                if use_ipv6 {
+                    self.ips = vec![addr];
+                }
+                if self.ips.is_empty() {
+                    return self.next().await;
+                }
+            } else {
+                let (host, port) = if let Ok(ip) = host.parse::<IpAddr>() {
+                    (ip.to_string(), 3478)
+                } else if let Ok(url) = url::Url::parse(&format!("stun://{}", host)) {
+                    let Some(parsed_host) = url.host_str() else {
+                        tracing::warn!(?host, "parse stun host failed");
+                        return self.next().await;
+                    };
+                    (parsed_host.to_string(), url.port().unwrap_or(3478))
+                } else {
+                    (host, 3478)
+                };
+
+                match resolve_host(&host, port).await {
+                    Ok(ips) => {
+                        self.ips = ips
+                            .into_iter()
+                            .filter(|x| if use_ipv6 { x.is_ipv6() } else { x.is_ipv4() })
+                            .choose_multiple(
+                                &mut rand::thread_rng(),
+                                self.max_ip_per_domain as usize,
+                            );
+
+                        if self.ips.is_empty() {
+                            return self.next().await;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(?host, ?e, "resolve host for stun failed");
+                        return self.next().await;
+                    }
+                };
+            }
         }
 
         Some(self.ips.remove(0))
@@ -1563,6 +1597,6 @@ mod tests {
         });
         let stun_servers = vec!["::1:55355".to_string()];
         let ret = StunInfoCollector::get_public_ipv6(&stun_servers).await;
-        println!("{:#?}", ret);
+        assert_eq!(ret, Some(Ipv6Addr::LOCALHOST));
     }
 }

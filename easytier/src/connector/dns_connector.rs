@@ -3,7 +3,7 @@ use std::{net::SocketAddr, sync::Arc};
 use super::{create_connector_by_url, http_connector::TunnelWithInfo};
 use crate::{
     common::{
-        dns::{RESOLVER, resolve_txt_record},
+        dns::{resolve_srv_records, resolve_txt_record},
         error::Error,
         global_ctx::ArcGlobalCtx,
         log,
@@ -122,14 +122,13 @@ impl DnsTunnelConnector {
         let srv_lookup_tasks = srv_domains
             .iter()
             .map(|(protocol, srv_domain)| {
-                let resolver = RESOLVER.clone();
                 let responses = responses.clone();
                 async move {
-                    let response = resolver.srv_lookup(srv_domain).await.with_context(|| {
+                    let records = resolve_srv_records(srv_domain).await.with_context(|| {
                         format!("srv_lookup failed, srv_domain: {}", srv_domain)
                     })?;
-                    tracing::info!(?response, ?srv_domain, "srv_lookup response");
-                    for record in response.iter() {
+                    tracing::info!(?records, ?srv_domain, "srv_lookup response");
+                    for record in records.iter() {
                         let parsed_record = Self::handle_one_srv_record(record, **protocol);
                         tracing::info!(?parsed_record, ?srv_domain, "parsed_record");
                         if let Err(e) = &parsed_record {

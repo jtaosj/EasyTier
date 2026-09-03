@@ -1,7 +1,7 @@
 <script setup lang="ts">
+import { AutoComplete, Button, Checkbox, Dialog, Divider, InputNumber, InputText, Panel, Password, SelectButton, ToggleButton } from 'primevue'
 import InputGroup from 'primevue/inputgroup'
 import InputGroupAddon from 'primevue/inputgroupaddon'
-import { Checkbox, InputText, InputNumber, AutoComplete, Panel, Divider, ToggleButton, Button, Password, Dialog } from 'primevue'
 import {
   addRow,
   DEFAULT_NETWORK_CONFIG,
@@ -11,6 +11,7 @@ import {
 } from '../types/network'
 import { ref, onMounted, onUnmounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import AclManager from './acl/AclManager.vue'
 import UrlListInput from './UrlListInput.vue'
 
 const props = defineProps<{
@@ -80,6 +81,7 @@ const bool_flags: BoolFlag[] = [
   { field: 'latency_first', help: 'latency_first_help' },
   { field: 'use_smoltcp', help: 'use_smoltcp_help' },
   { field: 'disable_ipv6', help: 'disable_ipv6_help' },
+  { field: 'ipv6_public_addr_auto', help: 'ipv6_public_addr_auto_help' },
   { field: 'enable_kcp_proxy', help: 'enable_kcp_proxy_help' },
   { field: 'disable_kcp_input', help: 'disable_kcp_input_help' },
   { field: 'enable_quic_proxy', help: 'enable_quic_proxy_help' },
@@ -97,6 +99,8 @@ const bool_flags: BoolFlag[] = [
   { field: 'disable_encryption', help: 'disable_encryption_help' },
   { field: 'disable_tcp_hole_punching', help: 'disable_tcp_hole_punching_help' },
   { field: 'disable_udp_hole_punching', help: 'disable_udp_hole_punching_help' },
+  { field: 'enable_udp_broadcast_relay', help: 'enable_udp_broadcast_relay_help' },
+  { field: 'disable_upnp', help: 'disable_upnp_help' },
   { field: 'disable_sym_hole_punching', help: 'disable_sym_hole_punching_help' },
   { field: 'enable_magic_dns', help: 'enable_magic_dns_help' },
   { field: 'enable_private_mode', help: 'enable_private_mode_help' },
@@ -209,7 +213,8 @@ watch(() => curNetwork.value, syncNormalizedNetwork, { immediate: true, deep: fa
                   </div>
                   <div class="items-center flex flex-col p-fluid gap-y-2">
                     <UrlListInput id="initial_nodes" v-model="curNetwork.peer_urls" :protos="protos"
-                      :add-label="t('add_initial_node')" :placeholder="t('initial_node_placeholder')" />
+                      defaultUrl="tcp://:11010" :add-label="t('add_initial_node')"
+                      :placeholder="t('initial_node_placeholder')" />
                   </div>
                 </div>
               </div>
@@ -302,6 +307,19 @@ watch(() => curNetwork.value, syncNormalizedNetwork, { immediate: true, deep: fa
                   </div>
                   <InputNumber id="mtu" v-model="curNetwork.mtu" aria-describedby="mtu-help" :format="false"
                     :placeholder="t('mtu_placeholder')" :min="400" :max="1380" fluid />
+                </div>
+              </div>
+
+              <div class="flex flex-row gap-x-9 flex-wrap">
+                <div class="flex flex-col gap-2 basis-5/12 grow">
+                  <div class="flex">
+                    <label for="instance_recv_bps_limit">{{ t('instance_recv_bps_limit') }}</label>
+                    <span class="pi pi-question-circle ml-2 self-center"
+                      v-tooltip="t('instance_recv_bps_limit_help')"></span>
+                  </div>
+                  <InputNumber id="instance_recv_bps_limit" v-model="curNetwork.instance_recv_bps_limit"
+                    aria-describedby="instance_recv_bps_limit-help" :format="false"
+                    :placeholder="t('instance_recv_bps_limit_placeholder')" :min="1" fluid />
                 </div>
               </div>
 
@@ -471,6 +489,18 @@ watch(() => curNetwork.value, syncNormalizedNetwork, { immediate: true, deep: fa
                   </Dialog>
                 </div>
               </div>
+            </div>
+          </Panel>
+
+          <Divider />
+
+          <Panel :header="t('acl.title')" toggleable collapsed>
+            <div v-if="curNetwork.acl" class="flex flex-col gap-y-2">
+              <AclManager v-model="curNetwork.acl" />
+            </div>
+            <div v-else class="flex justify-center p-4">
+              <Button :label="t('acl.enabled')"
+                @click="curNetwork.acl = { acl_v1: { chains: [], group: { declares: [], members: [] } } }" />
             </div>
           </Panel>
 

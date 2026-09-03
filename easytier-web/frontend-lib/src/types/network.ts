@@ -14,6 +14,74 @@ export interface SecureModeConfig {
   local_public_key?: string
 }
 
+export enum AclProtocol {
+  Unspecified = 0,
+  TCP = 1,
+  UDP = 2,
+  ICMP = 3,
+  ICMPv6 = 4,
+  Any = 5,
+}
+
+export enum AclAction {
+  Noop = 0,
+  Allow = 1,
+  Drop = 2,
+}
+
+export enum AclChainType {
+  UnspecifiedChain = 0,
+  Inbound = 1,
+  Outbound = 2,
+  Forward = 3,
+}
+
+export interface AclRule {
+  name: string
+  description: string
+  priority: number
+  enabled: boolean
+  protocol: AclProtocol
+  ports: string[]
+  source_ips: string[]
+  destination_ips: string[]
+  source_ports: string[]
+  action: AclAction
+  rate_limit: number
+  burst_limit: number
+  stateful: boolean
+  source_groups: string[]
+  destination_groups: string[]
+}
+
+export interface AclChain {
+  name: string
+  chain_type: AclChainType
+  description: string
+  enabled: boolean
+  rules: AclRule[]
+  default_action: AclAction
+}
+
+export interface GroupIdentity {
+  group_name: string
+  group_secret: string
+}
+
+export interface GroupInfo {
+  declares: GroupIdentity[]
+  members: string[]
+}
+
+export interface AclV1 {
+  chains: AclChain[]
+  group?: GroupInfo
+}
+
+export interface Acl {
+  acl_v1?: AclV1
+}
+
 export interface NetworkConfig {
   instance_id: string
 
@@ -47,6 +115,7 @@ export interface NetworkConfig {
 
   use_smoltcp?: boolean
   disable_ipv6?: boolean
+  ipv6_public_addr_auto?: boolean
   enable_kcp_proxy?: boolean
   disable_kcp_input?: boolean
   enable_quic_proxy?: boolean
@@ -64,6 +133,8 @@ export interface NetworkConfig {
   disable_encryption?: boolean
   disable_tcp_hole_punching?: boolean
   disable_udp_hole_punching?: boolean
+  disable_upnp?: boolean
+  enable_udp_broadcast_relay?: boolean
   disable_sym_hole_punching?: boolean
 
   enable_relay_network_whitelist?: boolean
@@ -78,12 +149,14 @@ export interface NetworkConfig {
   socks5_port: number
 
   mtu: number | null
+  instance_recv_bps_limit: number | null
   mapped_listeners: string[]
 
   enable_magic_dns?: boolean
   enable_private_mode?: boolean
 
   port_forwards: PortForwardConfig[]
+  acl?: Acl
 }
 
 export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
@@ -120,6 +193,7 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
 
     use_smoltcp: false,
     disable_ipv6: false,
+    ipv6_public_addr_auto: false,
     enable_kcp_proxy: false,
     disable_kcp_input: false,
     enable_quic_proxy: false,
@@ -137,6 +211,8 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     disable_encryption: false,
     disable_tcp_hole_punching: false,
     disable_udp_hole_punching: false,
+    disable_upnp: false,
+    enable_udp_broadcast_relay: false,
     disable_sym_hole_punching: false,
     enable_relay_network_whitelist: false,
     relay_network_whitelist: [],
@@ -146,10 +222,20 @@ export function DEFAULT_NETWORK_CONFIG(): NetworkConfig {
     enable_socks5: false,
     socks5_port: 1080,
     mtu: null,
+    instance_recv_bps_limit: null,
     mapped_listeners: [],
     enable_magic_dns: false,
     enable_private_mode: false,
     port_forwards: [],
+    acl: {
+      acl_v1: {
+        group: {
+          declares: [],
+          members: [],
+        },
+        chains: [],
+      },
+    },
   }
 }
 
@@ -363,4 +449,6 @@ export enum EventType {
   PortForwardAdded = 'PortForwardAdded', // PortForwardConfigPb
 
   ProxyCidrsUpdated = 'ProxyCidrsUpdated', // string[], string[]
+
+  UdpBroadcastRelayStartResult = 'UdpBroadcastRelayStartResult', // { capture_backend?: string, error?: string }
 }

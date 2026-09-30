@@ -2,6 +2,8 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use easytier_proto::{
+    api::config::{ConfigRpc, InstanceConfigPatch, PatchConfigRequest, VpnPortalClientPatch},
+    api::instance::{InstanceIdentifier, instance_identifier},
     api::manage::{
         CollectNetworkInfoRequest, CollectNetworkInfoResponse, DeleteNetworkInstanceRequest,
         GetNetworkInstanceConfigRequest, ListNetworkInstanceMetaRequest,
@@ -11,7 +13,7 @@ use easytier_proto::{
     rpc_types::controller::BaseController,
 };
 
-use crate::config::toml::ConfigSource;
+use crate::config::{api_input::NetworkConfigExt as _, toml::ConfigSource};
 
 use super::{config_source_from_rpc, config_source_to_rpc};
 
@@ -28,6 +30,107 @@ where
     ) -> Option<Box<dyn WebClientService<Controller = BaseController> + Send>>;
 
     fn get_storage(&self) -> &impl Storage<T, C, E>;
+
+    fn get_config_rpc_client(
+        &self,
+        identify: T,
+    ) -> Option<Box<dyn ConfigRpc<Controller = BaseController> + Send>>;
+
+    async fn handle_patch_vpn_portal_clients(
+        &self,
+        identify: T,
+        inst_id: uuid::Uuid,
+        patches: Vec<VpnPortalClientPatch>,
+    ) -> Result<(), RemoteClientError<E>> {
+        // The caller serializes this operation with its other device changes
+        // and (for Web) desired-config updates and runtime reconciliation.
+        if patches.is_empty() {
+            return Ok(());
+        }
+        let stored = self
+            .get_storage()
+            .get_network_config(identify.clone(), &inst_id.to_string())
+            .await
+            .map_err(RemoteClientError::PersistentError)?;
+        let stored_source = stored
+            .as_ref()
+            .map(PersistentConfig::get_network_config_source);
+        let mut desired = None;
+        if stored_source == Some(ConfigSource::Web) {
+            let mut config = stored
+                .as_ref()
+                .unwrap()
+                .get_network_config()
+                .map_err(RemoteClientError::PersistentError)?;
+            let candidate = config
+                .gen_config()
+                .map_err(|e| RemoteClientError::Other(e.to_string()))?;
+            super::config_patch::apply_vpn_portal_client_patches(&candidate, patches.clone())
+                .map_err(|e| RemoteClientError::Other(e.to_string()))?;
+            let normalized = crate::instance::CoreInstanceConfig::from_toml(&candidate)
+                .map_err(|e| RemoteClientError::Other(e.to_string()))?;
+            // Pending Web clients, addresses and ACL declarations may differ
+            // from runtime. Validate the actual saved candidate as well.
+            crate::gateway::vpn_portal::validate_clients(
+                normalized.vpn_portal.as_ref().unwrap(),
+                &super::config_patch::runtime_config_from_normalized(&normalized),
+            )
+            .map_err(|e| RemoteClientError::Other(e.to_string()))?;
+            let updated = NetworkConfig::new_from_config(&candidate)
+                .map_err(|e| RemoteClientError::Other(e.to_string()))?;
+            // Keep pending Web changes, including the listener and key.
+            // Only the requested device changes belong to this operation.
+            config.vpn_portal_config.as_mut().unwrap().clients =
+                updated.vpn_portal_config.unwrap().clients;
+            desired = Some(config);
+        }
+        let client = self
+            .get_config_rpc_client(identify.clone())
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        client
+            .patch_config(
+                BaseController::default(),
+                PatchConfigRequest {
+                    instance: Some(InstanceIdentifier {
+                        selector: Some(instance_identifier::Selector::Id(inst_id.into())),
+                    }),
+                    patch: Some(InstanceConfigPatch {
+                        vpn_portal_clients: patches,
+                        ..Default::default()
+                    }),
+                },
+            )
+            .await?;
+
+        // PatchConfig persists the node's TOML file, when present. GUI and
+        // Web also own saved configurations that must retain this change.
+        let rpc = self
+            .get_rpc_client(identify.clone())
+            .ok_or(RemoteClientError::ClientNotFound)?;
+        let response = rpc
+            .get_network_instance_config(
+                BaseController::default(),
+                GetNetworkInstanceConfigRequest {
+                    inst_id: Some(inst_id.into()),
+                },
+            )
+            .await?;
+        let config = response.config.ok_or_else(|| {
+            RemoteClientError::NotFound(format!("No running network instance: {inst_id}"))
+        })?;
+        let source = stored_source
+            .or_else(|| config_source_from_rpc(response.source))
+            .unwrap_or(ConfigSource::User);
+        self.get_storage()
+            .insert_or_update_user_network_config(
+                identify,
+                inst_id,
+                desired.unwrap_or(config),
+                source,
+            )
+            .await
+            .map_err(RemoteClientError::PersistentError)
+    }
 
     async fn handle_validate_config(
         &self,

@@ -1,9 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Context as _;
-use cidr::Ipv4Inet;
 use easytier_core::{
-    gateway::dhcp::{DhcpIpv4ApplyOutcome, DhcpIpv4ApplyPermit, DhcpIpv4Host},
+    gateway::dhcp::{DhcpAddresses, DhcpHost},
     host::packet::HostPacketReceiver,
     instance::CorePacketPlane,
 };
@@ -19,10 +18,7 @@ use super::{
     tun_common::{TunNicState, create_nic_ctx},
 };
 use crate::{
-    common::{
-        error::Error,
-        global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
-    },
+    common::{error::Error, global_ctx::ArcGlobalCtx},
     instance::shared_virtual_nic::ArcSharedVirtualNicRegistry,
 };
 
@@ -161,7 +157,10 @@ impl NativeTunRuntime {
 
     pub(super) async fn prepare(&self, packet_plane: Arc<CorePacketPlane>) -> anyhow::Result<()> {
         self.nic.drain().await;
-        if !self.global_ctx.get_flags().no_tun {
+        if !self.global_ctx.get_flags().no_tun
+            && !self.global_ctx.config.get_dhcp()
+            && !self.global_ctx.config.get_dhcpv6()
+        {
             self.start_static_ip(packet_plane).await?;
         }
         Ok(())
@@ -182,8 +181,8 @@ impl NativeTunRuntime {
         &self,
         operation: Arc<Mutex<()>>,
         packet_plane: Arc<CorePacketPlane>,
-    ) -> Arc<dyn DhcpIpv4Host> {
-        Arc::new(NativeDhcpIpv4Host {
+    ) -> Arc<dyn DhcpHost> {
+        Arc::new(NativeDhcpHost {
             global_ctx: self.global_ctx.clone(),
             operation,
             cancel: self.cancel.clone(),
@@ -195,39 +194,33 @@ impl NativeTunRuntime {
     }
 }
 
-struct NativeDhcpIpv4Host {
-    global_ctx: ArcGlobalCtx,
-    operation: Arc<Mutex<()>>,
-    cancel: CancellationToken,
+pub(super) struct NativeDhcpHost {
+    pub(super) global_ctx: ArcGlobalCtx,
+    pub(super) operation: Arc<Mutex<()>>,
+    pub(super) cancel: CancellationToken,
     nic: TunNicState,
     closed: Arc<Notify>,
     packet_plane: Arc<CorePacketPlane>,
     shared_virtual_nic_registry: ArcSharedVirtualNicRegistry,
 }
 
-impl NativeDhcpIpv4Host {
-    fn ensure_open(&self) -> anyhow::Result<()> {
-        if self.cancel.is_cancelled() {
-            anyhow::bail!("instance is closing; DHCP update cancelled");
-        }
-        Ok(())
+impl NativeDhcpHost {
+    pub(super) fn take_closed(&self) -> bool {
+        self.closed.notified().now_or_never().is_some()
     }
 
-    async fn apply(&self, next: Option<Ipv4Inet>) -> anyhow::Result<Option<Ipv4Inet>> {
+    pub(super) async fn apply(&self, next: DhcpAddresses) -> anyhow::Result<()> {
         self.ensure_open()?;
         tokio::select! {
             _ = self.cancel.cancelled() => anyhow::bail!("instance is closing; DHCP update cancelled"),
             _ = self.nic.drain() => {}
         }
+        self.set_addresses(DhcpAddresses::default());
         self.ensure_open()?;
-
-        let Some(ip) = next else {
-            self.global_ctx.set_ipv4(None);
-            return Ok(None);
-        };
-        if self.global_ctx.no_tun() {
-            self.global_ctx.set_ipv4(Some(ip));
-            return Ok(Some(ip));
+        let addresses = self.with_static_addresses(next);
+        if self.global_ctx.no_tun() || (addresses.ipv4.is_none() && addresses.ipv6.is_none()) {
+            self.set_addresses(next);
+            return Ok(());
         }
 
         let mut nic = create_nic_ctx(
@@ -240,52 +233,22 @@ impl NativeDhcpIpv4Host {
         .await?;
         tokio::select! {
             _ = self.cancel.cancelled() => anyhow::bail!("instance is closing; DHCP update cancelled"),
-            result = nic.run(Some(ip), self.global_ctx.get_ipv6()) => result?,
+            result = nic.run(addresses.ipv4, addresses.ipv6) => result?,
         }
-        let shared_route_backend = nic.shared_route_backend_for_dns();
-        let magic_dns = MagicDnsRuntime::start(
-            self.global_ctx.clone(),
-            self.packet_plane.clone(),
-            nic.ifname().await,
-            ip,
-            shared_route_backend,
-        );
-        self.nic.install(nic, magic_dns).await;
-        self.global_ctx.set_ipv4(Some(ip));
-        Ok(Some(ip))
-    }
-}
-
-#[async_trait::async_trait]
-impl DhcpIpv4Host for NativeDhcpIpv4Host {
-    fn take_interface_closed(&self) -> bool {
-        self.closed.notified().now_or_never().is_some()
-    }
-
-    async fn apply_dhcp_ipv4(
-        &self,
-        _previous: Option<Ipv4Inet>,
-        next: Option<Ipv4Inet>,
-    ) -> DhcpIpv4ApplyOutcome {
-        let permit = self.operation.clone().lock_owned().await;
-        let outcome = match self.apply(next).await {
-            Ok(actual) => DhcpIpv4ApplyOutcome::applied(actual),
-            Err(error) => DhcpIpv4ApplyOutcome::failed(self.global_ctx.get_ipv4(), error),
-        };
-        outcome.with_permit(DhcpIpv4ApplyPermit::new(permit))
-    }
-
-    fn publish_dhcp_ipv4(
-        &self,
-        previous: Option<Ipv4Inet>,
-        requested: Option<Ipv4Inet>,
-        actual: Option<Ipv4Inet>,
-    ) {
-        let event = if requested.is_none() {
-            GlobalCtxEvent::DhcpIpv4Conflicted(previous)
+        let magic_dns = if let Some(ip) = addresses.ipv4 {
+            let shared_route_backend = nic.shared_route_backend_for_dns();
+            MagicDnsRuntime::start(
+                self.global_ctx.clone(),
+                self.packet_plane.clone(),
+                nic.ifname().await,
+                ip,
+                shared_route_backend,
+            )
         } else {
-            GlobalCtxEvent::DhcpIpv4Changed(previous, actual)
+            MagicDnsRuntime::default()
         };
-        self.global_ctx.issue_event(event);
+        self.nic.install(nic, magic_dns).await;
+        self.set_addresses(next);
+        Ok(())
     }
 }

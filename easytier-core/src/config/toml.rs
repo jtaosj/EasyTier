@@ -64,6 +64,17 @@ pub trait ConfigLoader: Send + Sync {
         self.set_dhcp_config(DhcpConfig::Enabled(dhcp));
     }
 
+    fn get_dhcpv6_config(&self) -> DhcpConfig<cidr::Ipv6Cidr>;
+    fn set_dhcpv6_config(&self, dhcp: DhcpConfig<cidr::Ipv6Cidr>);
+
+    fn get_dhcpv6(&self) -> bool {
+        self.get_dhcpv6_config().enabled()
+    }
+
+    fn set_dhcpv6(&self, dhcp: bool) {
+        self.set_dhcpv6_config(DhcpConfig::Enabled(dhcp));
+    }
+
     fn add_proxy_cidr(
         &self,
         cidr: cidr::Ipv4Cidr,
@@ -406,6 +417,7 @@ struct Config {
     ipv6_public_addr_auto: Option<bool>,
     ipv6_public_addr_prefix: Option<String>,
     dhcp: Option<DhcpConfig>,
+    dhcpv6: Option<DhcpConfig<cidr::Ipv6Cidr>>,
     network_identity: Option<NetworkIdentity>,
     listeners: Option<Vec<url::Url>>,
     mapped_listeners: Option<Vec<url::Url>>,
@@ -739,6 +751,14 @@ impl ConfigLoader for TomlConfig {
 
     fn set_dhcp_config(&self, dhcp: DhcpConfig) {
         self.config.lock().unwrap().dhcp = Some(dhcp);
+    }
+
+    fn get_dhcpv6_config(&self) -> DhcpConfig<cidr::Ipv6Cidr> {
+        self.config.lock().unwrap().dhcpv6.unwrap_or_default()
+    }
+
+    fn set_dhcpv6_config(&self, dhcp: DhcpConfig<cidr::Ipv6Cidr>) {
+        self.config.lock().unwrap().dhcpv6 = Some(dhcp);
     }
 
     fn add_proxy_cidr(
@@ -1104,6 +1124,42 @@ mod tests {
             );
             config.set_dhcp(false);
             assert_eq!(config.get_dhcp_config(), DhcpConfig::Enabled(false));
+        }
+    }
+
+    #[test]
+    fn dhcpv6_config_round_trip_and_validation() {
+        assert!(!TomlConfig::default().get_dhcpv6());
+        for value in [
+            "true",
+            "false",
+            "'fd12:3456::/64'",
+            "'fd12::/126'",
+            "'2001:db8::/48'",
+        ] {
+            let config =
+                TomlConfig::new_from_str(&format!("dhcp = true\ndhcpv6 = {value}")).unwrap();
+            let exported = config.dump();
+            let restored = TomlConfig::new_from_str(&exported).unwrap();
+            assert_eq!(restored.get_dhcpv6_config(), config.get_dhcpv6_config());
+            assert!(restored.get_dhcp());
+            assert!(exported.contains("dhcp = true"));
+        }
+        for value in [
+            "yes",
+            "10.0.0.0/24",
+            "fd12::1/64",
+            "fd12::/127",
+            "fd12::/128",
+            "::/0",
+            "::/64",
+            "fe80::/64",
+            "ff00::/8",
+        ] {
+            assert!(
+                TomlConfig::new_from_str(&format!("dhcpv6 = '{value}'")).is_err(),
+                "accepted {value}"
+            );
         }
     }
 

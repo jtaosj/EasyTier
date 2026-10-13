@@ -1,13 +1,11 @@
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use cidr::Ipv4Inet;
 use easytier_core::{
-    gateway::dhcp::{DhcpIpv4ApplyOutcome, DhcpIpv4ApplyPermit, DhcpIpv4Host},
+    gateway::dhcp::{DhcpAddresses, DhcpHost},
     host::packet::HostPacketReceiver,
     instance::CorePacketPlane,
 };
-use futures::FutureExt as _;
 use tokio::sync::{Mutex, Notify, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
@@ -16,8 +14,7 @@ use super::{
     tun_common::{TunNicState, create_nic_ctx},
 };
 use crate::{
-    common::global_ctx::{ArcGlobalCtx, GlobalCtxEvent},
-    instance::shared_virtual_nic::ArcSharedVirtualNicRegistry,
+    common::global_ctx::ArcGlobalCtx, instance::shared_virtual_nic::ArcSharedVirtualNicRegistry,
 };
 
 struct MobileTunAttachment {
@@ -199,13 +196,12 @@ impl NativeTunRuntime {
         &self,
         operation: Arc<Mutex<()>>,
         _packet_plane: Arc<CorePacketPlane>,
-    ) -> Arc<dyn DhcpIpv4Host> {
-        Arc::new(NativeDhcpIpv4Host {
+    ) -> Arc<dyn DhcpHost> {
+        Arc::new(NativeDhcpHost {
             global_ctx: self.global_ctx.clone(),
             operation,
             cancel: self.cancel.clone(),
             nic: self.nic.clone(),
-            closed: Arc::new(Notify::new()),
         })
     }
 
@@ -216,69 +212,33 @@ impl NativeTunRuntime {
     }
 }
 
-struct NativeDhcpIpv4Host {
-    global_ctx: ArcGlobalCtx,
-    operation: Arc<Mutex<()>>,
-    cancel: CancellationToken,
+pub(super) struct NativeDhcpHost {
+    pub(super) global_ctx: ArcGlobalCtx,
+    pub(super) operation: Arc<Mutex<()>>,
+    pub(super) cancel: CancellationToken,
     nic: TunNicState,
-    closed: Arc<Notify>,
 }
 
-impl NativeDhcpIpv4Host {
-    fn ensure_open(&self) -> anyhow::Result<()> {
-        if self.cancel.is_cancelled() {
-            anyhow::bail!("instance is closing; DHCP update cancelled");
-        }
-        Ok(())
+impl NativeDhcpHost {
+    pub(super) fn take_closed(&self) -> bool {
+        // The mobile VPN owner recreates and attaches its interface in response
+        // to address events; desktop interface notifications do not apply here.
+        false
     }
 
-    async fn apply(&self, next: Option<Ipv4Inet>) -> anyhow::Result<Option<Ipv4Inet>> {
+    pub(super) async fn apply(&self, next: DhcpAddresses) -> anyhow::Result<()> {
         self.ensure_open()?;
+        // The static family may already have an attached VPN interface before
+        // DHCP's first round. No address event will rebuild it if nothing changed.
+        if next == self.current() {
+            return Ok(());
+        }
         tokio::select! {
             _ = self.cancel.cancelled() => anyhow::bail!("instance is closing; DHCP update cancelled"),
             _ = self.nic.drain() => {}
         }
         self.ensure_open()?;
-
-        let Some(ip) = next else {
-            self.global_ctx.set_ipv4(None);
-            return Ok(None);
-        };
-        self.global_ctx.set_ipv4(Some(ip));
-        Ok(Some(ip))
-    }
-}
-
-#[async_trait::async_trait]
-impl DhcpIpv4Host for NativeDhcpIpv4Host {
-    fn take_interface_closed(&self) -> bool {
-        self.closed.notified().now_or_never().is_some()
-    }
-
-    async fn apply_dhcp_ipv4(
-        &self,
-        _previous: Option<Ipv4Inet>,
-        next: Option<Ipv4Inet>,
-    ) -> DhcpIpv4ApplyOutcome {
-        let permit = self.operation.clone().lock_owned().await;
-        let outcome = match self.apply(next).await {
-            Ok(actual) => DhcpIpv4ApplyOutcome::applied(actual),
-            Err(error) => DhcpIpv4ApplyOutcome::failed(self.global_ctx.get_ipv4(), error),
-        };
-        outcome.with_permit(DhcpIpv4ApplyPermit::new(permit))
-    }
-
-    fn publish_dhcp_ipv4(
-        &self,
-        previous: Option<Ipv4Inet>,
-        requested: Option<Ipv4Inet>,
-        actual: Option<Ipv4Inet>,
-    ) {
-        let event = if requested.is_none() {
-            GlobalCtxEvent::DhcpIpv4Conflicted(previous)
-        } else {
-            GlobalCtxEvent::DhcpIpv4Changed(previous, actual)
-        };
-        self.global_ctx.issue_event(event);
+        self.set_addresses(next);
+        Ok(())
     }
 }
